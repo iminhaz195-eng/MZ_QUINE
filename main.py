@@ -33,8 +33,8 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     BotCommand,
-    ChatAction,
 )
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
