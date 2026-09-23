@@ -1,25 +1,23 @@
-# ═══════════════════════════════════════════════════════════
-#  MZ QUINE v8.0 — Python Dependencies
-#  Python version: 3.10 বা তার উপরে recommended
-# ═══════════════════════════════════════════════════════════
+# =============================================================================
+#  MZ QUINE — AI Girlfriend Telegram Bot
+#  Requirements for 512 MB RAM VPS (No GPU needed)
+#  Created by: MZ MINHAZ SIR
+# =============================================================================
 
-# ── Telegram Bot ────────────────────────────────────────────
-python-telegram-bot>=21.0,<22.0
+# ── Telegram Bot Framework ────────────────────────────────────────────────────
+python-telegram-bot[all]==21.6
 
-# ── Groq LLM API ────────────────────────────────────────────
-groq>=0.9.0
+# ── Groq AI (LLM) ─────────────────────────────────────────────────────────────
+groq==0.13.1
 
-# ── Language Detection ──────────────────────────────────────
-langdetect>=1.0.9
+# ── Voice — Google Text-to-Speech ─────────────────────────────────────────────
+gTTS==2.5.4
 
-# ── Google TTS (fallback voice) ─────────────────────────────
-gTTS>=2.5.0
+# ── Audio Conversion (MP3 → OGG/Opus for Telegram voice) ──────────────────────
+pydub==0.25.1
 
-# ── HTTP Requests (XTTS server call) ────────────────────────
-requests>=2.31.0
+# ── HTTP Client (Groq + gTTS dependency) ──────────────────────────────────────
+httpx==0.27.2
 
-# ── HuggingFace Gradio Client (XTTS Space call) ─────────────
-gradio_client>=1.0.0
-
-# ── Async HTTP support (python-telegram-bot এর জন্য) ────────
-httpx>=0.27.0
+# ── Core Runtime Dependencies ─────────────────────────────────────────────────
+python-dotenv==1.0.1
