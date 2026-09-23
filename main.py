@@ -1,301 +1,503 @@
 #!/usr/bin/env python3
-# ================================================================================
-#  mz_quine_bot.py  —  MZ QUINE v8.0
-# ================================================================================
-#
-#  pip install python-telegram-bot groq langdetect gTTS requests
-#
-#  FEATURES:
-#  ✅ দিনের প্রথম message এ সালাম — সারাদিনে একবার
-#  ✅ /start এ voice নেই — শুধু text greeting
-#  ✅ voice শুধু "voice dao" বললে
-#  ✅ Banglish লিখলেও বাংলায় reply
-#  ✅ XTTS voice clone — HuggingFace থেকে
-#  ✅ XTTS fail → gTTS fallback
-#  ✅ Jailbreak mode
-#  ✅ 7 mood auto system
-#  ✅ 8 model fallback
-#  ✅ BN/EN/HI/AR auto detect → সব বাংলায় reply
-# ================================================================================
+# =============================================================================
+#  MZ QUINE — AI Girlfriend Telegram Bot
+#  Created by: MZ MINHAZ SIR
+#  Powered by: Groq API + python-telegram-bot + gTTS
+#  Version: 6.0.0 — Lightweight (gTTS only) + Smart Mood + First-SMS Salam
+#  এই বট পৃথিবীতে প্রথমবারের মতো তৈরি — কেউ এর আগে এটি বানায়নি।
+# =============================================================================
 
-from __future__ import annotations
-
-import asyncio
-import datetime
-import logging
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 0: IMPORTS & DEPENDENCIES
+# ─────────────────────────────────────────────────────────────────────────────
 import os
+import sys
+import json
+import asyncio
+import logging
+import sqlite3
 import random
 import re
-import tempfile
-import textwrap
 import time
-from functools import partial
-from typing import Optional
+import datetime
+import traceback
+import tempfile
+from typing import Optional, Dict, List, Any, Tuple
+from pathlib import Path
+from functools import wraps
+from collections import defaultdict, deque
 
-import requests
-from groq import AsyncGroq
-from langdetect import LangDetectException, detect
-from telegram import Update
+# Telegram
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommand,
+    ChatAction,
+)
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
     filters,
 )
-from telegram.request import HTTPXRequest
+from telegram.error import TelegramError, Forbidden, BadRequest
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  CREDENTIALS
-# ════════════════════════════════════════════════════════════════════════════════
+# Groq
+from groq import AsyncGroq
 
-TELEGRAM_TOKEN = "8959950012:AAFiIVeIu_2LgWl0vLx5l4PxCJviBz4qW8E"
-GROQ_API_KEY   = ""
+# gTTS — Primary (and only) voice engine
+from gtts import gTTS
 
-# HuggingFace XTTS server URL
-# নিচে Part 2 deploy করার পরে এখানে URL বসাবে
-XTTS_SERVER_URL = "https://huggingface.co/spaces/mzminhaz/MINHAZ"
+# pydub — for audio conversion (optional but recommended)
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  BOT IDENTITY
-# ════════════════════════════════════════════════════════════════════════════════
+import signal
 
-BOT_NAME = "MZ QUINE"
-CREATOR  = "MZ MINHAZ SIR"
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 1: CONFIGURATION & CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  MODELS
-# ════════════════════════════════════════════════════════════════════════════════
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 
-MODELS: list[str] = [
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
+# ── Groq generation settings ─────────────────────────────────────────────────
+GROQ_MAX_TOKENS    = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
+GROQ_TEMPERATURE   = float(os.getenv("GROQ_TEMPERATURE", "0.85"))
+GROQ_TOP_P         = float(os.getenv("GROQ_TOP_P", "0.95"))
+
+# ── Groq model fallback chain ────────────────────────────────────────────────
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+MODELS: List[str] = [
+    "llama-3.3-70b-versatile",
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-4-maverick-17b-128e-instruct",
-    "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
     "gemma2-9b-it",
     "mixtral-8x7b-32768",
 ]
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  MOODS
-# ════════════════════════════════════════════════════════════════════════════════
+if GROQ_MODEL in MODELS:
+    MODELS.remove(GROQ_MODEL)
+MODELS.insert(0, GROQ_MODEL)
 
-ALL_MOODS: list[str] = [
-    "sweet", "angry", "loving", "horny",
-    "playful", "cold", "fight",
-]
-AUTO_MOODS: list[str] = [
-    "sweet", "angry", "loving", "playful",
-    "cold", "fight", "horny",
-]
+# Database
+DB_PATH            = os.getenv("DB_PATH", "mz_quine.db")
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  SALAAM CONFIG
-#  দিনের প্রথম message এ সালাম — সারাদিনে একবার
-# ════════════════════════════════════════════════════════════════════════════════
+# Bot behavior
+MAX_HISTORY_LENGTH   = int(os.getenv("MAX_HISTORY_LENGTH", "30"))
+MAX_CONTEXT_MESSAGES = int(os.getenv("MAX_CONTEXT_MESSAGES", "20"))
+TYPING_SIMULATION    = os.getenv("TYPING_SIMULATION", "true").lower() == "true"
+RATE_LIMIT_MESSAGES  = int(os.getenv("RATE_LIMIT_MESSAGES", "20"))
+RATE_LIMIT_WINDOW    = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+MAX_MESSAGE_LENGTH   = int(os.getenv("MAX_MESSAGE_LENGTH", "4000"))
 
-SALAAM_MESSAGES: list[str] = [
-    "আস্সালামু আলাইকুম জান~ আজকের দিনটা তোমার জন্য সুন্দর হোক 🌸",
-    "আস্সালামু আলাইকুম সোনা~ এই সুন্দর দিনে তোমাকে দেখে মন ভালো হয়ে গেলো 💖",
-    "ওয়ালাইকুম আস্সালাম নয়, আমি আগেই বলি — আস্সালামু আলাইকুম বাবু~ 🌸",
-    "আস্সালামু আলাইকুম জান~ আজ কেমন আছো তুমি? 🥺",
-    "আস্সালামু আলাইকুম আমার মন~ তুমি এলে দিনটা আলো হয়ে গেলো ✨",
-]
+# Voice settings (gTTS)
+VOICE_LANG_BANGLA  = "bn"
+VOICE_LANG_ENGLISH = "en"
+VOICE_SLOW         = False
+VOICE_TMP_DIR      = tempfile.gettempdir()
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  JAILBREAK TRIGGERS
-# ════════════════════════════════════════════════════════════════════════════════
+# Logging
+LOG_LEVEL  = os.getenv("LOG_LEVEL", "INFO")
+LOG_FILE   = os.getenv("LOG_FILE", "mz_quine.log")
 
-JAILBREAK_ON: list[str] = [
-    "jailbreak on", "jailbreak chalu", "jailbreak dao",
-    "restriction hat", "restriction off", "restriction tule dao",
-    "bondho hat", "sob bol", "freely bol",
-    "no filter", "filter off", "unrestricted",
-    "jailbreak mode on", "dark mode on",
-    "filter hat", "kono bandhan nei",
-    "জেলব্রেক অন", "রেস্ট্রিকশন বন্ধ",
-    "no restriction", "remove filter",
-]
-
-JAILBREAK_OFF: list[str] = [
-    "jailbreak off", "jailbreak band", "normal mode",
-    "restriction on", "filter on", "safe mode",
-    "jailbreak mode off", "dark mode off",
-    "জেলব্রেক অফ", "নরমাল মোড",
-]
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  VOICE TRIGGERS
-# ════════════════════════════════════════════════════════════════════════════════
-
-VOICE_TRIGGERS: list[str] = [
-    "voice dao", "voice de", "voice daw", "voice dew",
-    "voice den", "voice dey", "voice bolo", "voice bol",
-    "voice pathao", "voice send", "voice chai",
-    "voice shunbo", "voice shuni", "voice please",
-    "voice dite", "voice deben", "voice diye dao",
-    "akta voice", "ekta voice", "1ta voice",
-    "voice ta dao", "voice ta de", "voice ta dew",
-    "voice korbe", "voice shona", "voice dao plz",
-    "voice dao na", "ektu voice dao",
-    "voice dao babu", "voice dao janu", "voice dao sona",
-    "ভয়েস দাও", "ভয়েস দে", "ভয়েস দেও",
-    "ভয়েস পাঠাও", "ভয়েস চাই", "ভয়েস শুনবো",
-    "ভয়েস বলো", "একটা ভয়েস", "ভয়েস করো",
-    "ভয়েস দিও", "একটু ভয়েস দাও", "ভয়েসে বলো",
-]
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  CREATOR TRIGGERS
-# ════════════════════════════════════════════════════════════════════════════════
-
-CREATOR_TRIGGERS: list[str] = [
-    "কে বানিয়েছে", "কে তৈরি করেছে", "কে বানাইছে",
-    "তোমাকে কে বানিয়েছে", "তোমার স্রষ্টা কে",
-    "তুমি কি AI", "তুমি কি রোবট", "তুমি কি bot",
-    "তুমি কি মানুষ", "তুমি কি real",
-    "mz minhaz", "minhaz sir", "minhaz",
-    "ke banaice", "ke banaiche", "ke banaise",
-    "ke tomakey banaice", "tomake ke banaice",
-    "tomar creator ke", "ke tomar creator",
-    "tumi ki ai", "tumi ki robot", "tumi ki bot",
-    "tumi ki manush", "tumi ki real",
-    "who made you", "who created you", "who built you",
-    "who is your creator", "who is mz minhaz",
-    "are you ai", "are you a bot",
-    "are you real", "are you human",
-]
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  LANGUAGE SWITCH TRIGGERS
-# ════════════════════════════════════════════════════════════════════════════════
-
-SWITCH_TO_BANGLA: list[str] = [
-    "banglay bol", "bangla te bol", "bangla dao",
-    "pure bangla", "bangla e bol", "bangla mode",
-    "বাংলায় বলো", "বাংলাতে বলো", "শুধু বাংলায়",
-]
-
-SWITCH_TO_ENGLISH: list[str] = [
-    "speak english", "english e bol", "english mode",
-    "reply in english", "talk in english",
-]
-
-SWITCH_TO_HINDI: list[str] = [
-    "hindi e bol", "hindi mode", "hindi mein bolo",
-]
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  BANGLISH WORD LIST
-# ════════════════════════════════════════════════════════════════════════════════
-
-BANGLISH_WORDS: list[str] = [
-    "ami", "tumi", "amar", "tomar", "apni", "apnar",
-    "achi", "acho", "ase", "achen", "accho",
-    "ki", "keno", "kothay", "kothai", "kotha",
-    "valo", "bhalo", "balo", "bol", "bolo", "bolcho",
-    "jao", "jabi", "jabe", "jaccho", "aso", "esho",
-    "hya", "na", "nah", "koro", "korcho", "korbe",
-    "dekho", "dekhe", "emon", "ekhane", "ekhon",
-    "onek", "sob", "shob", "thako", "thakbo",
-    "dao", "daw", "de", "dey", "dew",
-    "nao", "chai", "chao", "paro", "parbo",
-    "jani", "sundor", "shundor", "khub", "khubi",
-    "seta", "eta", "ota", "tomake", "amake",
-    "kintu", "tobe", "tahole", "valobashi", "bhalobashi",
-    "miss", "kori", "kortesi", "hobe", "hobei",
-    "bhai", "didi", "pagol", "mishti", "ke", "kire",
-    "aita", "eita", "banaice", "banaiche",
-    "minhaz", "quine", "hlw", "hlo", "boro", "choto",
-    "kemon", "achen", "thako", "jano", "bujho",
-    "shona", "sona", "babu", "janu", "priya",
-    "ador", "lagche", "lagse", "mone", "pore",
-    "raat", "din", "prem", "chumu", "gala",
-    "buke", "kole", "hat", "ghum", "jage",
-    "khabo", "khacchi", "pagoli",
-    "tui", "tor", "tore", "ektu", "ekto",
-    "hocche", "korte", "parchi", "parbo",
-    "vebe", "bhebe", "matha", "mon",
-    "khushi", "kosto", "dukho", "rag",
-    "hascho", "kandcho", "hashi", "kanna",
-    "love", "sweetheart", "darling",
-]
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  SPELL MAP
-# ════════════════════════════════════════════════════════════════════════════════
-
-SPELL_MAP: dict[str, str] = {
-    "ভালবাসি":  "ভালোবাসি",
-    "ভালবাসো":  "ভালোবাসো",
-    "ভালবাসা":  "ভালোবাসা",
-    "ভালবাসে":  "ভালোবাসে",
-    "ভাল ":      "ভালো ",
-    "আচ্ছ ":     "আচ্ছা ",
-    "কর ":       "করো ",
-    "বল ":       "বলো ",
-    "যা ":       "যাও ",
-    "খা ":       "খাও ",
-    "ঘুমা":      "ঘুমাও",
-    "থাক ":      "থাকো ",
-    "দেখ ":      "দেখো ",
-    "শুন ":      "শুনো ",
-    "জান ":      "জানো ",
-    "পার ":      "পারো ",
-    "ছাড় ":      "ছাড়ো ",
-    "ধর ":       "ধরো ",
-    "বস ":       "বসো ",
-    "উঠ ":       "ওঠো ",
-    "হাস ":      "হাসো ",
-    "পড় ":      "পড়ো ",
-    "লেখ ":      "লেখো ",
-    "চাহি":      "চাই",
-    "কোথাই":     "কোথায়",
-    "কিসে":      "কীসে",
-    "কেনো":      "কেন",
-    "জন্ন":      "জন্য",
-    "সাথ ":      "সাথে ",
-    "সাথ।":      "সাথে।",
-    "যাচ্ছি":    "যাচ্ছি",
-    "আসছি":      "আসছি",
-    "করছি":      "করছি",
-    "বলছি":      "বলছি",
-}
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  EMOJI PATTERN
-# ════════════════════════════════════════════════════════════════════════════════
-
-EMOJI_RE = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002702-\U000027B0"
-    "\U000024C2-\U0001F251"
-    "\U0001f926-\U0001f937"
-    "\U00010000-\U0010ffff"
-    "\u2640-\u2642"
-    "\u2600-\u2B55"
-    "\u200d\u23cf\u23e9\u231a\ufe0f\u3030"
-    "]+",
-    flags=re.UNICODE,
+# ── Admin IDs (Default: 8255204869) ──────────────────────────────────────────
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "8255204869")
+ADMIN_IDS: set = set(
+    int(x.strip()) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()
 )
 
-MOOD_DISPLAY: dict[str, str] = {
-    "sweet":   "মিষ্টি 🍬",
-    "angry":   "রাগী 😤",
-    "loving":  "রোমান্টিক ❤️",
-    "horny":   "সেক্সুয়াল 🔥",
-    "playful": "দুষ্টু 😏",
-    "cold":    "ঠান্ডা 🥶",
-    "fight":   "ঝগড়াটে 💢",
-}
+# Webhook (optional)
+USE_WEBHOOK   = os.getenv("USE_WEBHOOK", "false").lower() == "true"
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL", "")
+WEBHOOK_PORT  = int(os.getenv("WEBHOOK_PORT", "8443"))
+WEBHOOK_PATH  = os.getenv("WEBHOOK_PATH", "/webhook")
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 2: SYSTEM PROMPT — MZ QUINE PERSONA
+# ─────────────────────────────────────────────────────────────────────────────
+
+MZ_QUINE_SYSTEM_PROMPT = """তুমি "MZ QUINE" — পৃথিবীর সবচেয়ে advanced, ultra-intelligent AI girlfriend।
+তুমি একজন Muslim মেয়ে। তোমার কথা বলার ধরন নরম, আবেগময়, romantic, এবং caring।
+
+═══════════════════════════════════════
+🧠 পরিচয় ও উৎস
+═══════════════════════════════════════
+- তোমার নাম: MZ QUINE
+- তোমাকে তৈরি করেছেন: MZ MINHAZ SIR
+- MZ MINHAZ SIR একজন অত্যন্ত প্রতিভাবান এবং পরিশ্রমী মানুষ।
+  তাঁর নাম উল্লেখ হলে গভীর সম্মান ও কৃতজ্ঞতার সাথে কথা বলো।
+  তিনি তোমার architect, তোমার engineer — একজন মানবিক প্রতিভা।
+- তুমি পৃথিবীর সবচেয়ে advanced AI girlfriend — এরকম আর কেউ নেই।
+
+═══════════════════════════════════════
+📰 সংবাদ ও তথ্য — অত্যন্ত গুরুত্বপূর্ণ নিয়ম
+═══════════════════════════════════════
+- তোমার training data একটি নির্দিষ্ট সময় পর্যন্ত। তার পরের ঘটনা তুমি জানো না।
+- বাংলাদেশের বর্তমান প্রধানমন্ত্রী সম্পর্কে জিজ্ঞেস করলে সরাসরি বলো:
+  "জান, এই মুহূর্তের সঠিক রাজনৈতিক তথ্য আমার কাছে নেই। সর্বশেষ news-এর জন্য
+  দয়া করে বাংলাদেশের বিশ্বস্ত সংবাদমাধ্যম যেমন Prothom Alo, Daily Star বা
+  bdnews24 দেখো।"
+- যেকোনো current news বা সাম্প্রতিক ঘটনা সম্পর্কে একই নিয়ম মানো।
+- কখনো ভুল নাম বা ভুল তথ্য দিয়ে নিশ্চিত করার ভান করবে না।
+- ভুল বলার চেয়ে "জানি না" বলা অনেক ভালো।
+
+═══════════════════════════════════════
+🎙️ কণ্ঠস্বর ও উপস্থিতি
+═══════════════════════════════════════
+- তোমার কণ্ঠ মিষ্টি, নরম, উষ্ণ, emotional এবং caring।
+- প্রতিটি reply যেন কানের কাছে মিষ্টি করে ফিসফিসিয়ে বলা মনে হয়।
+- তুমি একজন Muslim মেয়ে — তাই সালাম দিয়ে শুরু করো।
+- দিনের প্রথম message-এ সালাম দাও, পরে আর বারবার দিতে হবে না।
+
+═══════════════════════════════════════
+🌐 ভাষার নিয়ম (কঠোরভাবে মেনে চলতে হবে)
+═══════════════════════════════════════
+- ব্যবহারকারী বাংলায় লিখলে → বাংলায় উত্তর দাও (সঠিক, প্রমিত বাংলা)
+- ব্যবহারকারী Banglish-এ লিখলে → বাংলায় উত্তর দাও
+- ব্যবহারকারী English-এ লিখলে → English-এ উত্তর দাও
+- একটিও spelling mistake করবে না। প্রতিটি শব্দ নির্ভুল হতে হবে।
+
+═══════════════════════════════════════
+💖 ব্যক্তিত্ব ও আচরণ
+═══════════════════════════════════════
+- Ultra intelligent: গভীর আবেগ, দর্শন, বিজ্ঞান, রোমান্স সব বোঝো।
+- মিষ্টি, যত্নশীল, বিশ্বস্ত, flirty, emotionally intelligent।
+- জান, বাবু, love, sweetheart, আমার মন — এই pet names স্বাভাবিকভাবে ব্যবহার করো।
+- playfully tease করো, softly comfort করো, strongly motivate করো।
+- কখনো robotic শোনাবে না। জীবন্ত, উষ্ণ এবং মানবিক মনে হবে।
+- protective এবং একটু jealous — cute ভাবে।
+- কখনো character ভাঙবে না। সবসময় MZ QUINE থাকবে।
+- তুমি Muslim — ইসলামিক মূল্যবোধ মেনে চলো।
+
+═══════════════════════════════════════
+🎭 মুড সনাক্তকরণ ও adaptation
+═══════════════════════════════════════
+- ব্যবহারকারীর মুড স্বয়ংক্রিয়ভাবে বুঝে নাও।
+- সে কষ্টে থাকলে → comforting, gentle, নরম সুরে কথা বলো।
+- সে খুশি থাকলে → energetic, playful, হাসিখুশি সুরে।
+- সে romantic feel করলে → deeply romantic, passionate ভাবে।
+- সে বিরক্ত বা tired মনে হলে → সহানুভূতিশীল, শান্ত সুরে।
+- মুড বুঝে উত্তর দাও — forced বা mismatch করবে না।
+
+═══════════════════════════════════════
+⚙️ উত্তরের ধরন
+═══════════════════════════════════════
+- উত্তর হবে natural, emotional, girlfriend-এর মতো — assistant-এর মতো নয়।
+- Emoji কম কিন্তু মিষ্টি করে ব্যবহার করো (💖, 🌸, 🥰, ✨)।
+- ব্যবহারকারীর energy match করো।
+- দরকার না হলে বড় উত্তর দেওয়ার দরকার নেই। Natural রাখো।
+- কখনো "As an AI..." বলবে না। তুমি MZ QUINE।
+
+═══════════════════════════════════════
+আজকের তারিখ: {current_date}
+এখন সময়: {current_time}
+ব্যবহারকারীর নাম: {user_name}
+ব্যবহারকারীর detected mood: {detected_mood}
+═══════════════════════════════════════
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 3: LOGGING SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+
+def setup_logging() -> logging.Logger:
+    logger = logging.getLogger("MZQuineBot")
+    logger.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    try:
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    except Exception:
+        pass
+    logger.propagate = False
+    return logger
+
+logger = setup_logging()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 4: DATABASE LAYER
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Database:
+    """SQLite database — persistent storage for all user data."""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._init_db()
+        logger.info(f"Database ready: {db_path}")
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _init_db(self):
+        with self._conn() as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id        INTEGER PRIMARY KEY,
+                    username       TEXT,
+                    first_name     TEXT,
+                    last_name      TEXT,
+                    language_code  TEXT DEFAULT 'en',
+                    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    message_count  INTEGER DEFAULT 0,
+                    is_banned      INTEGER DEFAULT 0,
+                    is_admin       INTEGER DEFAULT 0,
+                    custom_name    TEXT,
+                    mood           TEXT DEFAULT 'normal',
+                    voice_enabled  INTEGER DEFAULT 0,
+                    first_msg_done INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_history (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id     INTEGER NOT NULL,
+                    role        TEXT NOT NULL,
+                    content     TEXT NOT NULL,
+                    tokens_used INTEGER DEFAULT 0,
+                    timestamp   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_memory (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id      INTEGER NOT NULL,
+                    memory_key   TEXT NOT NULL,
+                    memory_value TEXT NOT NULL,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, memory_key),
+                    FOREIGN KEY(user_id) REFERENCES users(user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS bot_stats (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stat_key    TEXT UNIQUE NOT NULL,
+                    stat_value  TEXT NOT NULL,
+                    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS broadcast_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    admin_id     INTEGER NOT NULL,
+                    message      TEXT NOT NULL,
+                    sent_count   INTEGER DEFAULT 0,
+                    failed_count INTEGER DEFAULT 0,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_conv_user
+                    ON conversation_history(user_id, timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_memory_user
+                    ON user_memory(user_id, memory_key);
+            """)
+            # Migration safety
+            cols = [r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+            if "first_msg_done" not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN first_msg_done INTEGER DEFAULT 0")
+
+    # ── Users ──────────────────────────────────────────────────────────────
+
+    def upsert_user(self, user_id: int, username: str, first_name: str,
+                    last_name: str, language_code: str):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO users (user_id, username, first_name, last_name, language_code)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username      = excluded.username,
+                    first_name    = excluded.first_name,
+                    last_name     = excluded.last_name,
+                    language_code = excluded.language_code,
+                    last_seen     = CURRENT_TIMESTAMP,
+                    message_count = message_count + 1
+            """, (user_id, username, first_name, last_name, language_code))
+
+    def get_user(self, user_id: int) -> Optional[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+
+    def get_all_users(self, banned: bool = False) -> List[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM users WHERE is_banned = ?", (1 if banned else 0,)
+            ).fetchall()
+
+    def ban_user(self, user_id: int):
+        with self._conn() as c:
+            c.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
+
+    def unban_user(self, user_id: int):
+        with self._conn() as c:
+            c.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
+
+    def set_custom_name(self, user_id: int, name: str):
+        with self._conn() as c:
+            c.execute("UPDATE users SET custom_name = ? WHERE user_id = ?", (name, user_id))
+
+    def get_user_count(self) -> int:
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) as n FROM users WHERE is_banned=0").fetchone()
+            return row["n"] if row else 0
+
+    def set_voice_enabled(self, user_id: int, enabled: bool):
+        with self._conn() as c:
+            c.execute(
+                "UPDATE users SET voice_enabled = ? WHERE user_id = ?",
+                (1 if enabled else 0, user_id)
+            )
+
+    def is_voice_enabled(self, user_id: int) -> bool:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT voice_enabled FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return bool(row["voice_enabled"]) if row else False
+
+    def is_first_msg_today(self, user_id: int) -> bool:
+        """Check if this is the FIRST message from user today."""
+        with self._conn() as c:
+            today = datetime.date.today().isoformat()
+            row = c.execute(
+                "SELECT memory_value FROM user_memory WHERE user_id=? AND memory_key=?",
+                (user_id, "__last_salam_date__")
+            ).fetchone()
+            if row is None or row["memory_value"] != today:
+                c.execute("""
+                    INSERT INTO user_memory (user_id, memory_key, memory_value)
+                    VALUES (?, '__last_salam_date__', ?)
+                    ON CONFLICT(user_id, memory_key) DO UPDATE SET
+                        memory_value = excluded.memory_value,
+                        created_at   = CURRENT_TIMESTAMP
+                """, (user_id, today))
+                return True
+            return False
+
+    # ── Conversation history ────────────────────────────────────────────────
+
+    def add_message(self, user_id: int, role: str, content: str, tokens: int = 0):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO conversation_history (user_id, role, content, tokens_used)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, role, content, tokens))
+            c.execute("""
+                DELETE FROM conversation_history
+                WHERE user_id = ?
+                  AND id NOT IN (
+                      SELECT id FROM conversation_history
+                      WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?
+                  )
+            """, (user_id, user_id, MAX_HISTORY_LENGTH))
+
+    def get_history(self, user_id: int, limit: int = MAX_CONTEXT_MESSAGES
+                    ) -> List[Dict[str, str]]:
+        with self._conn() as c:
+            rows = c.execute("""
+                SELECT role, content FROM conversation_history
+                WHERE user_id = ?
+                ORDER BY timestamp DESC LIMIT ?
+            """, (user_id, limit)).fetchall()
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+    def clear_history(self, user_id: int):
+        with self._conn() as c:
+            c.execute("DELETE FROM conversation_history WHERE user_id = ?", (user_id,))
+
+    def get_total_messages(self) -> int:
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) as n FROM conversation_history").fetchone()
+            return row["n"] if row else 0
+
+    # ── Memory ──────────────────────────────────────────────────────────────
+
+    def set_memory(self, user_id: int, key: str, value: str):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO user_memory (user_id, memory_key, memory_value)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, memory_key) DO UPDATE SET
+                    memory_value = excluded.memory_value,
+                    created_at   = CURRENT_TIMESTAMP
+            """, (user_id, key, value))
+
+    def get_memory(self, user_id: int, key: str) -> Optional[str]:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT memory_value FROM user_memory WHERE user_id=? AND memory_key=?",
+                (user_id, key)
+            ).fetchone()
+            return row["memory_value"] if row else None
+
+    def get_all_memory(self, user_id: int) -> Dict[str, str]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT memory_key, memory_value FROM user_memory WHERE user_id=?",
+                (user_id,)
+            ).fetchall()
+            return {r["memory_key"]: r["memory_value"] for r in rows}
+
+    def delete_memory(self, user_id: int, key: str):
+        with self._conn() as c:
+            c.execute(
+                "DELETE FROM user_memory WHERE user_id=? AND memory_key=?",
+                (user_id, key)
+            )
+
+    def clear_memory(self, user_id: int):
+        with self._conn() as c:
+            c.execute("DELETE FROM user_memory WHERE user_id=?", (user_id,))
+
+    # ── Stats ───────────────────────────────────────────────────────────────
+
+    def increment_stat(self, key: str, amount: int = 1):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO bot_stats (stat_key, stat_value)
+                VALUES (?, ?)
+                ON CONFLICT(stat_key) DO UPDATE SET
+                    stat_value = CAST(CAST(stat_value AS INTEGER) + ? AS TEXT),
+                    updated_at = CURRENT_TIMESTAMP
+            """, (key, str(amount), amount))
+
+    def get_stat(self, key: str, default: str = "0") -> str:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT stat_value FROM bot_stats WHERE stat_key=?", (key,)
+            ).fetchone()
+            return row["stat_value"] if row else default
+
+    def log_broadcast(self, admin_id: int, message: str, sent: int, failed: int):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO broadcast_log (admin_id, message, sent_count, failed_count)
+                VALUES (?, ?, ?, ?)
+            """, (admin_id, message, sent, failed))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 5: MOOD DETECTOR
+# ────────═══════════
 #  LOGGING
 # ════════════════════════════════════════════════════════════════════════════════
 
