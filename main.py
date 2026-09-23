@@ -64,8 +64,8 @@ import signal
 # SECTION 1: CONFIGURATION & CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8959950012:AAFZLYGn_rRky34xd96Rt65XeVyqw9R_Afc")
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "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")
 
 # ── Groq generation settings ─────────────────────────────────────────────────
 GROQ_MAX_TOKENS    = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
